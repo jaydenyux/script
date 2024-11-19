@@ -6,6 +6,21 @@ if [ "$(id -u)" != "0" ]; then
     exit 1
 fi
 
+# 配置 BBR
+echo "正在配置 BBR..."
+cat >> /etc/sysctl.conf << EOF
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+EOF
+sysctl -p
+
+# 验证 BBR 是否开启
+if lsmod | grep bbr; then
+    echo "BBR 已成功启用"
+else
+    echo "BBR 启用失败，请检查系统支持情况"
+fi
+
 # 交互式输入参数
 read -p "请输入你的域名: " DOMAIN
 while [[ -z "$DOMAIN" ]]; do
@@ -130,8 +145,27 @@ cat > /usr/local/etc/v2ray/config.json << EOF
 }
 EOF
 
-# 配置 Nginx
+# 首先配置一个基本的 Nginx 配置（不包含 SSL）
 echo "配置 Nginx..."
+cat > /etc/nginx/conf.d/v2ray.conf << EOF
+server {
+    listen 80;
+    server_name ${DOMAIN};
+    
+    location / {
+        return 404;
+    }
+}
+EOF
+
+# 重启 Nginx
+systemctl restart nginx
+
+# 申请 SSL 证书
+echo "申请 SSL 证书..."
+certbot --nginx -d ${DOMAIN} --email ${EMAIL} --agree-tos --non-interactive
+
+# 配置完整的 Nginx（包含 SSL 和 V2Ray 配置）
 cat > /etc/nginx/conf.d/v2ray.conf << EOF
 server {
     listen ${HTTPS_PORT} ssl;
@@ -151,14 +185,18 @@ server {
 }
 EOF
 
-# 申请 SSL 证书
-echo "申请 SSL 证书..."
-certbot --nginx -d ${DOMAIN} --email ${EMAIL} --agree-tos --non-interactive
+# 检查 Nginx 配置
+nginx -t
 
-# 启动服务
-echo "启动服务..."
-systemctl restart v2ray
-systemctl restart nginx
+# 如果配置正确，重启服务
+if [ $? -eq 0 ]; then
+    echo "Nginx 配置检查通过，重启服务..."
+    systemctl restart nginx
+    systemctl restart v2ray
+else
+    echo "Nginx 配置有误，请检查配置文件"
+    exit 1
+fi
 
 # 设置开机自启
 systemctl enable v2ray
@@ -175,5 +213,11 @@ echo "UUID: ${UUID}"
 echo "路径: /api/streaming/8d4e9f"
 echo "传输协议: ws"
 echo "TLS: 开启"
+echo "BBR: 已启用"
 echo "================================================"
 echo "请保存好以上信息！"
+
+# 最后检查服务状态
+echo "检查服务状态..."
+systemctl status v2ray --no-pager
+systemctl status nginx --no-pager
