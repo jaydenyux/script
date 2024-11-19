@@ -27,6 +27,23 @@ while [[ -z "$DOMAIN" ]]; do
     read -p "域名不能为空，请重新输入: " DOMAIN
 done
 
+# 检查域名解析
+echo "正在检查域名解析..."
+DOMAIN_IP=$(dig +short ${DOMAIN})
+SERVER_IP=$(curl -s ipv4.icanhazip.com)
+
+if [ "$DOMAIN_IP" != "$SERVER_IP" ]; then
+    echo "警告：域名 ${DOMAIN} 解析到的IP ($DOMAIN_IP) 与服务器IP ($SERVER_IP) 不匹配"
+    echo "请确保："
+    echo "1. 已经正确设置域名解析"
+    echo "2. 解析已经生效（可能需要等待几分钟到几小时）"
+    read -p "是否继续安装？(y/n): " continue_install
+    if [[ "$continue_install" != "y" && "$continue_install" != "Y" ]]; then
+        echo "安装已取消"
+        exit 1
+    fi
+fi
+
 read -p "请输入你的邮箱: " EMAIL
 while [[ ! "$EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; do
     read -p "邮箱格式不正确，请重新输入: " EMAIL
@@ -64,21 +81,23 @@ if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
     exit 1
 fi
 
-# 更新系统并安装必要的包
-echo "正在更新系统并安装必要的包..."
-apt update && apt upgrade -y
-apt install -y curl wget unzip nginx certbot python3-certbot-nginx iptables
+# 提示配置云平台安全组
+echo "================================================"
+echo "请确保在云平台控制台配置以下端口："
+echo "- TCP 80 端口 (证书申请用)"
+echo "- TCP ${HTTPS_PORT} 端口 (HTTPS)"
+echo "- TCP ${V2RAY_PORT} 端口 (V2Ray)"
+echo "================================================"
+read -p "已经配置好安全组规则了吗？(y/n): " sg_confirm
+if [[ "$sg_confirm" != "y" && "$sg_confirm" != "Y" ]]; then
+    echo "请配置好安全组规则后再继续"
+    exit 1
+fi
 
-# 配置防火墙规则
-echo "配置防火墙规则..."
-iptables -I INPUT -p tcp --dport $HTTPS_PORT -j ACCEPT
-iptables -I INPUT -p tcp --dport 80 -j ACCEPT
-iptables -I INPUT -p tcp --dport 22 -j ACCEPT
-
-# 保存防火墙规则
-apt install -y iptables-persistent
-netfilter-persistent save
-netfilter-persistent reload
+# 仅更新软件包列表并安装必要的包
+echo "正在安装必要的包..."
+apt update
+DEBIAN_FRONTEND=noninteractive apt install -y curl wget unzip nginx certbot python3-certbot-nginx dnsutils
 
 # 安装 V2Ray
 echo "正在安装 V2Ray..."
@@ -145,12 +164,16 @@ cat > /usr/local/etc/v2ray/config.json << EOF
 }
 EOF
 
-# 首先配置一个基本的 Nginx 配置（不包含 SSL）
-echo "配置 Nginx..."
+# 配置基础 Nginx
+echo "配置基础 Nginx..."
 cat > /etc/nginx/conf.d/v2ray.conf << EOF
 server {
     listen 80;
     server_name ${DOMAIN};
+    
+    location /.well-known/acme-challenge/ {
+        root /var/www/html;
+    }
     
     location / {
         return 404;
@@ -158,12 +181,28 @@ server {
 }
 EOF
 
+# 创建验证目录
+mkdir -p /var/www/html/.well-known/acme-challenge
+chmod -R 755 /var/www/html
+
 # 重启 Nginx
 systemctl restart nginx
 
-# 申请 SSL 证书
+# 等待 Nginx 完全启动
+sleep 5
+
+# 申请证书
 echo "申请 SSL 证书..."
 certbot --nginx -d ${DOMAIN} --email ${EMAIL} --agree-tos --non-interactive
+
+# 检查证书是否成功申请
+if [ ! -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" ]; then
+    echo "证书申请失败，请检查："
+    echo "1. 域名解析是否正确"
+    echo "2. 80端口是否可以访问"
+    echo "3. 防火墙设置是否正确"
+    exit 1
+fi
 
 # 配置完整的 Nginx（包含 SSL 和 V2Ray 配置）
 cat > /etc/nginx/conf.d/v2ray.conf << EOF
